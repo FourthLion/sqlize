@@ -85,17 +85,34 @@ class Clause(BaseClause):
         for p in parts[1:]:
             self.parts.append((connector, p))
 
-    def serialize_part(self, connector, part):
+    def serialize_part(self, connector, part, func=None):
+
+        if func is not None: 
+            part = func(part)
+
         if connector:
             part = '{} {}'.format(connector, part)
         return part + ' '
 
     def serialize(self):
         if not self.parts:
-            return ''
+            return ''        
+
         sql = self.keyword + ' '
-        for connector, part in self.parts:
-            sql += self.serialize_part(connector, part)
+        first = True
+        for i in range(len(self.parts)):
+            p = self.parts[i] 
+            connector = p[0]
+            part = p[1] 
+            func = None
+            if len(p) > 2: 
+                func = p[2]
+
+            if first: 
+                sql += self.serialize_part('', part, func)
+                first = False
+            else: 
+                sql += self.serialize_part(connector, part, func)
         return sql.rstrip()
 
     def __bool__(self):
@@ -158,6 +175,7 @@ class Where(Clause):
 
     AND = 'AND'
     OR = 'OR'
+    TREE = 'TREE'
 
     def __init__(self, *args, **kwargs):
         if kwargs.pop('use_or', False):
@@ -178,6 +196,45 @@ class Where(Clause):
             self.parts.append((self.OR, condition))
         return self
 
+    def tree_(self, condition): 
+        
+        self.parts.append((self.TREE, condition, 
+                           self.tree_serializer))
+        
+
+    def tree_serializer(self, condition): 
+        
+        # print("Looking at condition", condition) 
+        if isinstance(condition, list) and len(condition) == 1: 
+            return self.tree_serializer(condition[0])
+
+        if isinstance(condition, str): 
+            return condition
+
+        # If this is simply a list of lists, then insert an AND node at the beginning" 
+        if isinstance(condition, list) and len(condition) > 1 and isinstance(condition[0], list): 
+            condition.insert(0, self.AND)
+
+        cond = condition[0]
+        clauses = condition[1:]
+        if len(clauses) == 1: 
+            clauses = condition[1] 
+            if len(clauses) == 1: 
+                combined = clauses[0]
+            else: 
+                combined = "( " + (") " + cond + " ( ").join(clauses) + " )"
+            final = "( " + combined + " )"
+            # print("Returning 1", final) 
+            return final
+        else: 
+            clauses = [self.tree_serializer(x) \
+                       for x in condition[1:]]
+            combined = "( " + (") " + cond + " ( ").join(clauses) + " )"
+            final = "( " + combined + " )"
+            # print("Returning 2", final) 
+            return combined 
+        
+
     __iand__ = and_
     __iadd__ = and_
     __ior__ = or_
@@ -197,6 +254,22 @@ class Group(BaseClause):
         sql += ', '.join(self.parts)
         if self.having:
             sql += ' HAVING {}'.format(self.having)
+        return sql
+
+class GroupingSet(BaseClause):
+    keyword = 'GROUPING SETS'
+
+    def __init__(self, *parts, **kwargs):
+        self.parts = parts
+
+    def serialize(self):
+        if not self.parts:
+            return ''
+        sql = self.keyword + ' '
+        parts = self.parts
+        parts = ["(" + ",".join(p) + ")" for p in parts]
+        sql += "(" + ",".join(parts) + ")" 
+        
         return sql
 
 
@@ -305,29 +378,34 @@ class Select(Statement):
         'sets': From,
         'where': Where,
         'group': Group,
+        'groupingset': GroupingSet,
         'order': Order,
         'limit': int,
     }
 
-    def __init__(self, what=['*'], sets=None, where=None, group=None,
+    def __init__(self, what=['*'], sets=None, 
+                 where=None, group=None, grouping=None,
                  order=None, limit=None, offset=None):
         self.what = what
         self.sets = sets
         self.where = where
         self.group = group
+        self.grouping = grouping
         self.order = order
         self.limit = limit
         self.offset = offset
 
     def serialize(self):
-        sql = 'SELECT '
-        sql += ', '.join(self._what)
+        sql = 'SELECT ' 
+        sql += ', '.join(self._what) 
         if self.sets:
-            sql += ' {}'.format(self._from)
+            sql += ' {}'.format(self._from) 
         if self.where:
             sql += ' {}'.format(self._where)
         if self.group:
             sql += ' {}'.format(self._group)
+        if self.grouping:
+            sql += ' {}'.format(self._grouping)
         if self.order:
             sql += ' {}'.format(self._order)
         if self.limit:
@@ -349,6 +427,10 @@ class Select(Statement):
     @property
     def _group(self):
         return self._get_clause(self.group, Group)
+
+    @property
+    def _grouping(self):
+        return self._get_clause(self.grouping, GroupingSet)
 
     @property
     def _order(self):
@@ -436,3 +518,4 @@ class Insert(Statement):
 
 class Replace(Insert):
     keyword = 'REPLACE INTO'
+    
